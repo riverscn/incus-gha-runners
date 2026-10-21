@@ -7,7 +7,8 @@ usage() {
 	cat <<'EOF'
 Usage: sudo doctor [--config FILE]
 
-Checks the host (Incus, bridge, forwarding rules, Docker Hub cache) and each runner
+Checks the host (systemd, Incus 6.0+, firewall setup, bridge, forwarding rules, Docker Hub
+cache) and each runner
 container 1..RUNNER_COUNT (DNS, GitHub, Docker, runner service, distinct machine-ids).
 Prints ok or FAIL with a fix for each, and exits 1 when anything failed. Changes nothing.
 EOF
@@ -30,7 +31,18 @@ check() { # check DESCRIPTION FIX COMMAND...
 }
 
 echo "== host"
+check "host runs systemd" "use a systemd distribution" test -d /run/systemd/system
 check "incus works" "sudo bin/prepare-host" incus info
+iv=$(incus_version || true)
+check "Incus ${iv:-?} is 6.0 or later" "upgrade Incus (https://linuxcontainers.org/incus/docs/main/installing/)" version_ge "${iv:-0}" 6.0
+if [[ $BASE_IMAGE == mmdebstrap ]]; then
+	check "mmdebstrap and the Debian keyring are installed" "install mmdebstrap and debian-archive-keyring, or set BASE_IMAGE=images" \
+		test -x "$(command -v mmdebstrap || echo /nonexistent)" -a -e /usr/share/keyrings/debian-archive-keyring.gpg
+fi
+check "firewalld is not active (not handled by these scripts)" "see docs/troubleshooting.md (firewalld)" sh -c '! systemctl is-active --quiet firewalld'
+if command -v docker >/dev/null; then
+	check "host Docker uses the iptables firewall backend" "see docs/troubleshooting.md (nftables)" test "$(docker_firewall_backend)" = iptables
+fi
 check "bridge $INCUS_BRIDGE has an IPv4 address" "sudo bin/prepare-host; or set INCUS_BRIDGE" bridge_ipv4
 addr=$(bridge_ipv4 || true)
 if command -v docker >/dev/null && iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'; then
@@ -52,7 +64,7 @@ declare -A machine_ids=()
 for n in $(seq 1 "$RUNNER_COUNT"); do
 	name=$(container "$n")
 	echo "== $name"
-	check "exists" "sudo bin/add-runner $n" exists "$name" || true
+	check "exists" "sudo bin/add-runner $n" exists "$name"
 	exists "$name" || continue
 	check "running" "sudo incus start $name" test "$(state "$name")" = RUNNING
 	[[ $(state "$name") == RUNNING ]] || continue

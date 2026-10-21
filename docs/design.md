@@ -119,10 +119,10 @@ All in `bin/`, run as root, sharing `lib/common.sh`. Common options: `--config F
 
 One-time host preparation; safe to run again.
 
-1. Check the OS (warn, do not refuse, on anything other than Debian 13).
-2. `apt-get install incus` (plus `mmdebstrap` when `BASE_IMAGE=mmdebstrap`).
+1. Check the system: systemd is required; anything other than Debian 13 gets an "untested" warning, not a refusal.
+2. When `incus` is missing (and, with `BASE_IMAGE=mmdebstrap`, `mmdebstrap` and `debian-archive-keyring`): `apt-get install` where there is apt; without apt it does not guess another package manager but lists a step to do by hand (exit code 3), for the person or agent to install them the distribution's way and run it again. Incus must be 6.0 or later.
 3. If Incus is not initialised, `incus admin init --minimal` (`dir` storage pool, bridge `incusbr0`); if it is, leave it alone.
-4. If Docker is installed on the host and the `FORWARD` chain's policy is DROP, install `incus-docker-forward.service` (`After=docker.service`, runs at boot): in the `DOCKER-USER` chain it allows only `incusbr0 → UPLINK_IF` and the `RELATED,ESTABLISHED` replies, without opening any other forwarding on the host, and without Incus's `ip-forward-no-drop` style of opening all forwarding. **Changes the firewall: needs confirmation.**
+4. With firewalld active, or the host's Docker on its nftables firewall backend, leave the firewall alone and list a step to do by hand (exit code 3). Otherwise, if Docker is installed on the host and the `FORWARD` chain's policy is DROP, install `incus-docker-forward.service` (`After=docker.service`, runs at boot): in the `DOCKER-USER` chain it allows only `incusbr0 → UPLINK_IF` and the `RELATED,ESTABLISHED` replies, without opening any other forwarding on the host, and without Incus's `ip-forward-no-drop` style of opening all forwarding. **Changes the firewall: needs confirmation.**
 5. With `HUB_MIRROR=on`, start the cache container on the host's Docker (`--restart unless-stopped`, `-p <bridge address>:<port>:5000`, volume `hub-mirror`). Fails with a hint to set `off` when the host has no Docker. **Opens a service on the host (to the container subnet only): needs confirmation.**
 
 A unit or container of the same name that already exists counts as done (compatible with environments built by hand before this project).
@@ -190,4 +190,4 @@ The scripts never prompt. Operations that change the host or deregister runners 
 
 ## 8. Tested on
 
-A Debian 13 (trixie) host with Docker 29.9 and Incus 6.0.4 (Debian's own package), a QEMU virtual machine with 12 cores and 11G of memory. Tested with `NETWORK_PRESET=cn`; the `global` path with `BASE_IMAGE=images` has not been tested on that host.
+The containers are always Debian, whatever the host runs; the host needs systemd, Incus 6.0 or later, and Docker's iptables backend when it runs Docker (see the host requirements in `docs/setup`). Tested on a Debian 13 (trixie) host with Docker 29.9 and Incus 6.0.4 (Debian's own package), a QEMU virtual machine with 12 cores and 11G of memory. Tested with `NETWORK_PRESET=cn`; the `global` path with `BASE_IMAGE=images` has not been tested on that host.

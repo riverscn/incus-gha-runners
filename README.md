@@ -75,7 +75,8 @@ Then use the label in a workflow: `runs-on: [self-hosted, ci]`.
 Debian 13 (trixie) host, Docker 29.9, Incus 6.0.4 (Debian's package), as a QEMU virtual machine with 12 cores
 and 11G of memory, running 4 runners for a pnpm monorepo CI (type checks, Playwright e2e on desktop and
 mobile, Docker image builds with Compose), with `NETWORK_PRESET=cn`. The `images.linuxcontainers.org` path
-(`BASE_IMAGE=images`) and other distributions are untested.
+(`BASE_IMAGE=images`) is untested. Other hosts with systemd and Incus 6.0+ should work (the containers are
+Debian either way); see the [host requirements](docs/setup.md#host-requirements).
 
 ## Security
 

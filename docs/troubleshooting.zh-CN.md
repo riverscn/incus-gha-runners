@@ -23,6 +23,15 @@ sudo systemctl status incus-docker-forward.service
 
 规则没了（比如有东西清空了这条链）就重启这个服务。出口网卡不是默认路由那块时，设置 `UPLINK_IF`，删掉单元文件后重新执行 `prepare-host`。不要按 Incus 的提示放开全部转发：那样主机上的 Docker 网络也一起被放开了。
 
+## firewalld 或 Docker 的 nftables 后端
+
+`prepare-host` 只会在 Docker 的 iptables 规则里放行 `incusbr0` 出网。firewalld 在运行，或者 Docker 设了 `"firewall-backend": "nftables"` 时，它把这一步列为需要手工完成的事并以退出码 3 结束，不改防火墙。替代做法（本项目未验证）：
+
+- firewalld：把网桥放进 trusted 区域，`firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent && firewall-cmd --reload`（见 Incus 文档中 firewalld 的部分）。
+- Docker 用 nftables：Docker 自己的链会丢弃它不认识的转发流量；按 Docker 的 nftables 文档，在你自己的表里放行 `incusbr0` 到出口网卡以及回包。
+
+之后 `doctor` 要显示容器能访问 api.github.com。
+
 ## 从 images.linuxcontainers.org 下载失败（国内）
 
 国内下载常被重置。用 `BASE_IMAGE=mmdebstrap`（`NETWORK_PRESET=cn` 已包含）：系统镜像在主机上从 `DEBIAN_MIRROR` 构建。

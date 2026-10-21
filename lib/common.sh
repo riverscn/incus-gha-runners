@@ -192,6 +192,22 @@ load_config() {
 	TEMPLATE=$CONTAINER_PREFIX-tpl
 }
 
+# ---- host -------------------------------------------------------------------
+
+# version_ge A B: version A >= B
+version_ge() { [[ $(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1) == "$2" ]]; }
+
+incus_version() { incus version 2>/dev/null | sed -n 's/^Server version: *//p'; }
+
+# docker_firewall_backend: iptables or nftables (Docker before 28 only has iptables).
+docker_firewall_backend() {
+	local d
+	d=$(docker info --format '{{if .FirewallBackend}}{{.FirewallBackend.Driver}}{{end}}' 2>/dev/null || true)
+	printf '%s' "${d:-iptables}"
+}
+
+firewalld_active() { systemctl is-active --quiet firewalld 2>/dev/null; }
+
 # ---- incus ------------------------------------------------------------------
 
 container() { printf '%s-%s' "$CONTAINER_PREFIX" "$1"; }

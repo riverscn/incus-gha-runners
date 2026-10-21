@@ -56,8 +56,9 @@ write in, and quote the Chinese documents when that is Chinese.
    Use `remove-token` for `remove-runner`, and `orgs/ORG/…` for organisation runners.
 4. **Leave other runners and services on the host alone**, including runners running directly on the host
    (for example a deploy runner) and its Docker containers.
-5. **Exit code 3 means the script stopped for a confirmation or a token.** Read its `confirm:` line, ask the
-   person (or fetch the token), then rerun with what it asked for.
+5. **Exit code 3 means the script stopped for a confirmation, a token, or a step it leaves to people**
+   (`todo` lines from `prepare-host`). Read its `confirm:` and `todo` lines, ask the person (or fetch the
+   token), then rerun with what it asked for.
 
 ## Step 1: find out what the person wants
 
@@ -76,6 +77,17 @@ the workflows use in `runs-on`, how many jobs should run at once, and whether th
 
 ## Step 2: a new host
 
+0. Check the host against the requirements in `docs/setup.md` (`/etc/os-release`, `incus version`, systemd,
+   firewalld, `docker info` firewall backend). The containers are Debian whatever the host runs, so only
+   the host side may need adapting:
+   - Debian or Ubuntu: nothing to do, `prepare-host` installs Incus with apt.
+   - Another distribution: install Incus 6.0+ (and, with `BASE_IMAGE=mmdebstrap`, `mmdebstrap` and the
+     Debian archive keyring, or choose `BASE_IMAGE=images`) the way that distribution documents it. Show
+     the person the commands and wait for a yes (rule 1).
+   - firewalld or Docker's nftables backend: the scripts will not change that firewall. Explain what
+     `docs/troubleshooting.md` suggests and let the person decide; do not write firewall rules of your own
+     without their yes.
+   Tell the person that hosts other than Debian 13 are untested.
 1. Clone the repository to `/opt/incus-gha-runners` on the host, write `/etc/incus-gha-runners/config.env`
    from `config.example.env` with the values from Step 1, and show it to the person.
 2. `sudo bin/prepare-host --dry-run`; show the output, ask (rule 1), then run it without `--dry-run`.

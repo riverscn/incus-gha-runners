@@ -2,8 +2,30 @@
 
 # Setup: from a bare host to working runners
 
-You need: a Linux host (tested on Debian 13) where you have sudo, Docker on it only if you want the Docker Hub
-cache, and `gh` logged in on your own computer with admin access to the repository (or organisation).
+You need: a Linux host where you have sudo (see the requirements below), Docker on it only if you want the
+Docker Hub cache, and `gh` logged in on your own computer with admin access to the repository (or
+organisation).
+
+## Host requirements
+
+The containers always run Debian, built by `build-template`, whatever the host runs. The host needs:
+
+- systemd, and Incus 6.0 or later. On Debian 13 and Ubuntu 24.04, `prepare-host` installs Incus with apt.
+  On other distributions, install it first the distribution's way
+  ([Incus installation guide](https://linuxcontainers.org/incus/docs/main/installing/)); `prepare-host`
+  then only checks it.
+- With `BASE_IMAGE=mmdebstrap`: `mmdebstrap` and the Debian archive keyring
+  (`/usr/share/keyrings/debian-archive-keyring.gpg`). Installed with apt where there is apt; elsewhere
+  install them yourself or use `BASE_IMAGE=images`.
+- If the host runs Docker: Docker's iptables firewall backend (the default). The scripts do not handle
+  firewalld or Docker's nftables backend; `prepare-host` stops and says so (see
+  [troubleshooting](troubleshooting.md#firewalld-or-dockers-nftables-backend)).
+
+| Host | Status |
+|---|---|
+| Debian 13 | tested |
+| Ubuntu 24.04 | should work (apt, Incus 6.0 in the archive), untested |
+| Other systemd distributions with Incus 6.0+ | should work after installing Incus by hand, untested |
 
 ## 1. Get the scripts and write the configuration
 

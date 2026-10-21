@@ -2,7 +2,21 @@
 
 # 安装：从一台空主机到可用的 runner
 
-需要：一台 Linux 主机（在 Debian 13 上验证过），你有 sudo；只有要用 Docker Hub 拉取缓存时主机上才需要 Docker；你自己电脑上的 `gh` 已登录，对仓库（或组织）有管理员权限。
+需要：一台 Linux 主机，你有 sudo（要求见下）；只有要用 Docker Hub 拉取缓存时主机上才需要 Docker；你自己电脑上的 `gh` 已登录，对仓库（或组织）有管理员权限。
+
+## 主机要求
+
+不管主机是什么系统，容器里一律是 `build-template` 构建的 Debian。主机需要：
+
+- systemd，Incus 6.0 及以上。Debian 13 和 Ubuntu 24.04 上由 `prepare-host` 用 apt 安装 Incus。其他发行版先按该发行版的方式装好（[Incus 安装文档](https://linuxcontainers.org/incus/docs/main/installing/)），`prepare-host` 只做检查。
+- `BASE_IMAGE=mmdebstrap` 时：`mmdebstrap` 和 Debian 归档密钥（`/usr/share/keyrings/debian-archive-keyring.gpg`）。有 apt 时自动安装；没有 apt 时自己装，或者改用 `BASE_IMAGE=images`。
+- 主机跑 Docker 时：Docker 用 iptables 防火墙后端（默认）。脚本不处理 firewalld 和 Docker 的 nftables 后端，遇到时 `prepare-host` 停下并说明（见[故障排查](troubleshooting.zh-CN.md#firewalld-或-docker-的-nftables-后端)）。
+
+| 主机 | 状态 |
+|---|---|
+| Debian 13 | 已验证 |
+| Ubuntu 24.04 | 应该可用（apt，仓库里有 Incus 6.0），未验证 |
+| 其他装得上 Incus 6.0+ 的 systemd 发行版 | 手工装好 Incus 后应该可用，未验证 |
 
 ## 1. 取脚本，写配置
 

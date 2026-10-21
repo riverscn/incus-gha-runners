@@ -119,10 +119,10 @@
 
 一次性准备主机，可重复执行。
 
-1. 检查系统（Debian 13 以外的给出警告，不拒绝）。
-2. `apt-get install incus`（`BASE_IMAGE=mmdebstrap` 时加 `mmdebstrap`）。
+1. 检查系统：必须是 systemd；Debian 13 以外的给出"未验证"警告，不拒绝。
+2. 缺 `incus`（`BASE_IMAGE=mmdebstrap` 时还有 `mmdebstrap` 和 `debian-archive-keyring`）时：有 apt 就 `apt-get install`；没有 apt 时不猜别的包管理器，列为手工步骤（退出码 3），由人或 agent 按发行版的方式安装后再执行。Incus 必须是 6.0 及以上。
 3. Incus 未初始化时 `incus admin init --minimal`（`dir` 存储池，网桥 `incusbr0`）；已初始化则不动。
-4. 主机装了 Docker 且 `FORWARD` 链默认策略是 DROP 时，安装 `incus-docker-forward.service`（`After=docker.service`，开机执行）：在 `DOCKER-USER` 链只放行 `incusbr0 → UPLINK_IF` 和回程的 `RELATED,ESTABLISHED`，不放开主机的其他转发，也不用 Incus 的 `ip-forward-no-drop` 之类放开全部转发的办法。**改防火墙，需确认。**
+4. firewalld 在运行，或主机 Docker 用的是 nftables 防火墙后端时，不改防火墙，列为手工步骤（退出码 3）。否则，主机装了 Docker 且 `FORWARD` 链默认策略是 DROP 时，安装 `incus-docker-forward.service`（`After=docker.service`，开机执行）：在 `DOCKER-USER` 链只放行 `incusbr0 → UPLINK_IF` 和回程的 `RELATED,ESTABLISHED`，不放开主机的其他转发，也不用 Incus 的 `ip-forward-no-drop` 之类放开全部转发的办法。**改防火墙，需确认。**
 5. `HUB_MIRROR=on` 时在主机 Docker 上起拉取缓存容器（`--restart unless-stopped`，`-p <网桥地址>:<端口>:5000`，数据卷 `hub-mirror`）。主机没装 Docker 时报错并提示改为 `off`。**在主机上开放一个服务（只对容器网段），需确认。**
 
 已存在的同名单元和容器视为已完成（兼容本文之前手工搭的环境）。
@@ -190,4 +190,4 @@
 
 ## 8. 验证环境
 
-Debian 13（trixie）主机，Docker 29.9，Incus 6.0.4（Debian 自带的包），QEMU 虚拟机 12 核 11G。验证的是 `NETWORK_PRESET=cn`；`global` 的 `BASE_IMAGE=images` 路径未在该主机上验证。
+容器一律是 Debian，与主机系统无关；对主机的要求是 systemd、Incus 6.0 及以上，主机有 Docker 时用 iptables 后端（见 `docs/setup` 的主机要求）。验证过的是 Debian 13（trixie）主机，Docker 29.9，Incus 6.0.4（Debian 自带的包），QEMU 虚拟机 12 核 11G。验证的是 `NETWORK_PRESET=cn`；`global` 的 `BASE_IMAGE=images` 路径未在该主机上验证。

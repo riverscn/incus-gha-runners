@@ -33,6 +33,20 @@ uplink interface is not the one of the default route, set `UPLINK_IF` and run `p
 deleting the unit file. Do not use Incus's suggestion to let all forwarding through: that opens the host's
 Docker networks too.
 
+## firewalld, or Docker's nftables backend
+
+`prepare-host` only knows how to let `incusbr0` out through Docker's iptables rules. With firewalld active,
+or Docker set to `"firewall-backend": "nftables"`, it lists this as a step to do by hand and exits with 3,
+without changing the firewall. What to do instead (untested here):
+
+- firewalld: put the bridge in the trusted zone,
+  `firewall-cmd --zone=trusted --change-interface=incusbr0 --permanent && firewall-cmd --reload`
+  (see the Incus documentation on firewalld).
+- Docker with nftables: Docker's own chains drop forwarded traffic it does not know; allow `incusbr0` to the
+  uplink and the replies back in a table of your own, as described in Docker's nftables documentation.
+
+Then `doctor` must show that containers reach api.github.com.
+
 ## Downloads from images.linuxcontainers.org fail (mainland China)
 
 They are often reset. Use `BASE_IMAGE=mmdebstrap` (part of `NETWORK_PRESET=cn`): the base image is built on

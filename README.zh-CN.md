@@ -63,7 +63,7 @@ ssh HOST sudo /opt/incus-gha-runners/bin/doctor
 
 ## 验证环境
 
-Debian 13（trixie）主机，Docker 29.9，Incus 6.0.4（Debian 自带的包），QEMU 虚拟机 12 核 11G，跑 4 个 runner，承担一个 pnpm monorepo 的 CI（类型检查、桌面和手机两路 Playwright e2e、用 Compose 的 Docker 镜像构建），`NETWORK_PRESET=cn`。`images.linuxcontainers.org` 那条路径（`BASE_IMAGE=images`）和其他发行版未验证。
+Debian 13（trixie）主机，Docker 29.9，Incus 6.0.4（Debian 自带的包），QEMU 虚拟机 12 核 11G，跑 4 个 runner，承担一个 pnpm monorepo 的 CI（类型检查、桌面和手机两路 Playwright e2e、用 Compose 的 Docker 镜像构建），`NETWORK_PRESET=cn`。`images.linuxcontainers.org` 那条路径（`BASE_IMAGE=images`）未验证。其他有 systemd、装得上 Incus 6.0+ 的主机应该可用（容器里都是 Debian），见[主机要求](docs/setup.zh-CN.md#主机要求)。
 
 ## 安全
 

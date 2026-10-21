@@ -7,11 +7,15 @@ usage() {
 	cat <<'EOF'
 Usage: sudo prepare-host [--config FILE] [--dry-run]
 
-Installs Incus (and mmdebstrap when BASE_IMAGE=mmdebstrap), initialises Incus with a
-minimal setup when it is not initialised, and, when needed:
+Checks the host (systemd, Incus 6.0 or later), installs Incus (and mmdebstrap when
+BASE_IMAGE=mmdebstrap) with apt where it is missing, initialises Incus with a minimal setup
+when it is not initialised, and, when needed:
   - allows the Incus bridge through Docker's FORWARD DROP policy (incus-docker-forward.service)
   - starts the Docker Hub pull-through cache on the bridge address (HUB_MIRROR=on)
 Both change the host: run with --dry-run first and show the output to whoever owns the host.
+
+Without apt, or with firewalld or Docker's nftables backend, it does not improvise: it lists
+what is left to do by hand and exits with 3.
 EOF
 }
 
@@ -20,34 +24,47 @@ require_root
 load_config
 take_lock
 
+# Steps the script will not do on this host; listed at the end, exit code 3.
+manual=()
+
 echo "== system"
 # shellcheck source=/dev/null
 . /etc/os-release
 if [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]]; then
-	ok "$PRETTY_NAME"
+	ok "$PRETTY_NAME (tested)"
 else
-	warn "tested on Debian 13 only; this is ${PRETTY_NAME:-unknown}"
+	warn "${PRETTY_NAME:-unknown system}: not tested, only Debian 13 is (see docs/setup.md, host requirements)"
 fi
+[[ -d /run/systemd/system ]] || die "the host must run systemd"
+ok "systemd"
+has_apt=0
+command -v apt-get >/dev/null && has_apt=1
 
 echo "== packages"
-packages=(incus)
-[[ $BASE_IMAGE == mmdebstrap ]] && packages+=(mmdebstrap)
+# command or file -> apt package
+declare -A wanted=([incus]=incus)
+if [[ $BASE_IMAGE == mmdebstrap ]]; then
+	wanted[mmdebstrap]=mmdebstrap
+	wanted[/usr/share/keyrings/debian-archive-keyring.gpg]=debian-archive-keyring
+fi
 missing=()
-for p in "${packages[@]}"; do
-	if dpkg-query -W -f '${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-		ok "$p installed"
+for what in "${!wanted[@]}"; do
+	if [[ $what == /* && -e $what ]] || { [[ $what != /* ]] && command -v "$what" >/dev/null; }; then
+		ok "${wanted[$what]} present"
 	else
-		missing+=("$p")
+		missing+=("${wanted[$what]}")
 	fi
 done
-if ((${#missing[@]})); then
+if ((${#missing[@]})) && ((has_apt)); then
 	run apt-get update
 	run env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+elif ((${#missing[@]})); then
+	manual+=("install ${missing[*]} with this system's package manager (Incus: https://linuxcontainers.org/incus/docs/main/installing/)$([[ $BASE_IMAGE == mmdebstrap ]] && echo ', or set BASE_IMAGE=images'), then run prepare-host again")
 fi
 
 echo "== incus"
-if ((DRY_RUN)) && ! command -v incus >/dev/null; then
-	step "would initialise Incus after installing it"
+if ! command -v incus >/dev/null; then
+	step "initialise Incus once it is installed"
 elif [[ -n $(incus storage list -f csv 2>/dev/null) ]]; then
 	ok "initialised"
 	incus network show "$INCUS_BRIDGE" >/dev/null 2>&1 ||
@@ -57,11 +74,20 @@ else
 	run incus admin init --minimal
 	((DRY_RUN)) || ok "bridge $INCUS_BRIDGE ($(bridge_ipv4))"
 fi
+if command -v incus >/dev/null && ! ((DRY_RUN && ${#missing[@]})); then
+	v=$(incus_version)
+	version_ge "$v" 6.0 || die "Incus $v is too old; 6.0 or later is needed"
+	ok "Incus $v"
+fi
 
-echo "== forwarding through Docker's firewall"
+echo "== firewall"
 unit=/etc/systemd/system/incus-docker-forward.service
-if ! command -v docker >/dev/null || ! command -v iptables >/dev/null; then
+if firewalld_active; then
+	manual+=("firewalld is active, which these scripts do not handle: let $INCUS_BRIDGE out by hand (see docs/troubleshooting.md)")
+elif ! command -v docker >/dev/null || ! command -v iptables >/dev/null; then
 	ok "no Docker on the host, nothing to do"
+elif [[ $(docker_firewall_backend) != iptables ]]; then
+	manual+=("Docker uses the $(docker_firewall_backend) firewall backend, which these scripts do not handle: let $INCUS_BRIDGE out by hand (see docs/troubleshooting.md)")
 elif ! iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'; then
 	ok "FORWARD policy is not DROP, nothing to do"
 else
@@ -124,4 +150,14 @@ else
 	esac
 fi
 
-((DRY_RUN)) && echo "dry run: nothing was changed" || echo "host ready"
+if ((${#manual[@]})); then
+	echo "== left to do by hand"
+	for m in "${manual[@]}"; do printf '  todo   %s\n' "$m"; done
+fi
+if ((DRY_RUN)); then
+	echo "dry run: nothing was changed"
+elif ((${#manual[@]})); then
+	needs_confirmation "the host is not ready: do the steps above, then run prepare-host again"
+else
+	echo "host ready"
+fi
