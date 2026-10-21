@@ -73,9 +73,7 @@ Read from `/etc/incus-gha-runners/config.env` by default; `--config FILE` (or th
 | `DEBIAN_SUITE` | `trixie` | The containers' Debian release |
 | `EXTRA_PACKAGES` | empty | Extra apt packages for the template |
 | `DOCKER_BUILDER_KEEP` | `3GB` | Build cache limit of the dockerd in each container (`builder.gc.defaultKeepStorage`) |
-| `PLAYWRIGHT_DEPS` | empty | Such as `chromium`: the template temporarily gets Node, runs `npx playwright@<version> install-deps <browser>`, then Node is removed. The runner user has no sudo, so workflows cannot use `--with-deps` |
-| `PLAYWRIGHT_VERSION` | `latest` | Match the project's Playwright version |
-| `TEMPLATE_HOOK` | empty | Path of a script on the host, pushed into the template and run as root, for project-specific software |
+| `HOOKS_DIR` | `/etc/incus-gha-runners/hooks.d/<CONTAINER_PREFIX>` | Directory of install scripts for project-specific dependencies, see 4.5 |
 
 ### 4.3 Network switches (mainland China)
 
@@ -92,8 +90,6 @@ Download locations that follow these switches (each can also be set on its own):
 | Key | global | cn |
 |---|---|---|
 | `DOCKER_APT_URL` | `https://download.docker.com/linux/debian` | `https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian` |
-| `NODE_DIST_URL` (only for `PLAYWRIGHT_DEPS`) | `https://nodejs.org/dist` | `https://npmmirror.com/mirrors/node` |
-| `NPM_REGISTRY` (same) | `https://registry.npmjs.org` | `https://registry.npmmirror.com` |
 | `RUNNER_DOWNLOAD_URL` | `https://github.com/actions/runner/releases/download` | same (GitHub downloads usually work in mainland China; point it at your own mirror if slow) |
 
 `HUB_MIRROR_PORT` (default `5000`) and `HUB_MIRROR_NAME` (default `hub-mirror`) can be changed.
@@ -105,9 +101,18 @@ Download locations that follow these switches (each can also be set on its own):
 | `INCUS_BRIDGE` | `incusbr0` | The bridge created by `incus admin init --minimal` |
 | `UPLINK_IF` | interface of the default route | Outgoing interface in the forwarding rules |
 
+### 4.5 Project-specific dependencies: hooks, not configuration
+
+The scripts install only what every pool needs (the OS, Docker, the runner). Which system libraries a project needs (such as Playwright's browser libraries, or a language toolchain) is decided by the person or agent from the project's workflows and written as hook scripts; the configuration has no keys for particular tools.
+
+- Hooks are the `*.sh` files in `HOOKS_DIR`, pushed into the container and run as root in file-name order; they must be safe to run again. The configuration values (such as `DEBIAN_MIRROR`) are in their environment, so hooks can use the same mirrors.
+- `build-template` runs every hook in the template; existing runner containers catch up with `apply-hooks [N…|--all]`, without a rebuild (containers running a job are skipped).
+- Why preinstall at all: the runner user has no sudo, so workflows cannot install system packages (such as Playwright's `--with-deps`). Things a workflow can install into the user's home (Node, pnpm, the browsers themselves) do not belong in hooks.
+- The skill explains how to decide what to install (look for workflow steps that need root), and `docs/operations` gives common examples, including Playwright: install Node temporarily, `npx playwright@<the project's version> install-deps chromium`, remove Node; after upgrading Playwright, `apply-hooks --all`.
+
 ## 5. Scripts
 
-All in `bin/`, run as root, sharing `lib/common.sh`. Common options: `--config FILE`, `--dry-run` (print the changes it would make, change nothing), `-h`. Exit codes: `0` success; `1` failure; `2` usage error; `3` confirmation needed (see 5.6).
+All in `bin/`, run as root, sharing `lib/common.sh`. Common options: `--config FILE`, `--dry-run` (print the changes it would make, change nothing), `-h`. Exit codes: `0` success; `1` failure; `2` usage error; `3` confirmation needed (see 5.7).
 
 ### 5.1 `prepare-host`
 
@@ -128,9 +133,9 @@ Builds the template container `<prefix>-tpl`, left stopped.
 1. System image: `BASE_IMAGE=images` uses `images:debian/<release>` directly; `mmdebstrap` builds a minbase on the host (plus `systemd`, `systemd-resolved`, `udev`, `dbus`, `ca-certificates`, `curl`, `git`, `iproute2`, `gnupg`, `sudo`, `locales`; writes `/etc/systemd/network/eth0.network` for DHCP; without `udev`, networkd waits forever and never gets an address) and imports it under the alias `igr/debian-<release>`, reused afterwards.
 2. Launch with `security.nesting=true`, `security.syscalls.intercept.mknod=true`, `security.syscalls.intercept.setxattr=true` (needed for Docker in the container) and wait for the network.
 3. Point the container's apt at `DEBIAN_MIRROR`; install `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin` from Docker's apt repository (`DOCKER_APT_URL`); write `/etc/docker/daemon.json` (build cache limit, log rotation; plus `registry-mirrors` and `insecure-registries` with `HUB_MIRROR=on`).
-4. Install `EXTRA_PACKAGES`; with `PLAYWRIGHT_DEPS`, the browser system libraries (see 4.2).
+4. Install `EXTRA_PACKAGES`.
 5. Create user `runner` (in the container's `docker` group only, no sudo). The runner archive is downloaded on the host and cached in `/var/cache/incus-gha-runners/`, pushed into the container and unpacked to `/home/runner/actions-runner`, then its own `bin/installdependencies.sh` is run (libicu and friends are missing otherwise).
-6. Run `TEMPLATE_HOOK`.
+6. Run the hooks (see 4.5).
 7. Seal: empty `/etc/machine-id` (otherwise every copy gets the same DHCP address), delete `/var/lib/docker/engine-id`, `apt-get clean`, stop the container.
 
 Does nothing when a complete template (with a completion marker) exists. `--rebuild` deletes and rebuilds the template (existing runner containers are untouched; `--yes` skips confirmation).
@@ -153,12 +158,16 @@ One token registers any number of runners (it is valid for an hour), so `--all` 
 
 **Stopping, deregistering and deleting need confirmation**: without `--yes` it prints what it would do and exits with 3.
 
-### 5.5 `status`, `doctor`
+### 5.5 `apply-hooks [N…|--all]`
+
+Runs the hooks (see 4.5) in existing runner containers, skipping and reporting containers that are running a job.
+
+### 5.6 `status`, `doctor`
 
 - `status`: per container its state, IP, runner service state, registered name, whether a job is running, disk use; whether the template exists and when it was built. Read-only.
 - `doctor`: read-only checks, each printed as `ok` / `FAIL` with the fix: Incus works; the bridge exists; the forwarding rules are in place (when the host has Docker); the pull-through cache is reachable from the containers (with `HUB_MIRROR=on`); every container resolves names, reaches GitHub, runs `docker info` and has its runner service running; the containers' machine-ids differ.
 
-### 5.6 Operations that need confirmation
+### 5.7 Operations that need confirmation
 
 The scripts never prompt. Operations that change the host or deregister runners are either listed first by `--dry-run` or require `--yes`, and are then run by the person (or by an agent after the person agreed):
 
@@ -172,11 +181,11 @@ The scripts never prompt. Operations that change the host or deregister runners 
 
 ## 6. Agent skill
 
-`skills/incus-gha-runners/SKILL.md` only orchestrates: find out the goal (new install, more runners, new template, troubleshooting), read this document and the matching parts of `docs/`, and run the scripts in order. Before any operation in the table above, and before deleting users and directories on the host (such as old runners that ran directly on the host before a migration), it tells the person the exact commands and their effect and waits for a yes. Tokens are only piped, never printed.
+`skills/incus-gha-runners/SKILL.md` only orchestrates: find out the goal (new install, more runners, new template, project dependencies, troubleshooting), read the target repository's workflows to decide which system dependencies must be preinstalled and write them as hooks, read this document and the matching parts of `docs/`, and run the scripts in order. Before any operation in the table above, and before deleting users and directories on the host (such as old runners that ran directly on the host before a migration), it tells the person the exact commands and their effect and waits for a yes. Tokens are only piped, never printed.
 
 ## 7. Documentation
 
-`README` and `docs/` in English and Simplified Chinese (`*.zh-CN.md`, kept in step). Planned `docs/`: `design` (this document), `setup` (from scratch), `operations` (day to day: more or fewer runners, a new template, updating the Playwright dependencies, migrating a hand-built setup), `troubleshooting` (known pitfalls: networkd waiting, the same DHCP address, FORWARD DROP, Docker Hub resets, `ERR_NETWORK_CHANGED`).
+`README` and `docs/` in English and Simplified Chinese (`*.zh-CN.md`, kept in step). Planned `docs/`: `design` (this document), `setup` (from scratch), `operations` (day to day: more or fewer runners, a new template, writing hooks with common examples such as Playwright, migrating a hand-built setup), `troubleshooting` (known pitfalls: networkd waiting, the same DHCP address, FORWARD DROP, Docker Hub resets, `ERR_NETWORK_CHANGED`).
 
 ## 8. Tested on
 

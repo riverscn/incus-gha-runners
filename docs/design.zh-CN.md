@@ -73,9 +73,7 @@
 | `DEBIAN_SUITE` | `trixie` | 容器的系统版本 |
 | `EXTRA_PACKAGES` | 空 | 额外装进模板的 apt 包 |
 | `DOCKER_BUILDER_KEEP` | `3GB` | 容器内 dockerd 的构建缓存上限（`builder.gc.defaultKeepStorage`） |
-| `PLAYWRIGHT_DEPS` | 空 | 如 `chromium`：模板里临时装 Node，执行 `npx playwright@<版本> install-deps <浏览器>` 后删掉 Node。runner 用户没有 sudo，工作流里不能 `--with-deps` |
-| `PLAYWRIGHT_VERSION` | `latest` | 与项目使用的 Playwright 版本一致 |
-| `TEMPLATE_HOOK` | 空 | 主机上的一个脚本路径，推进模板后以 root 执行，用来装项目特有的东西 |
+| `HOOKS_DIR` | `/etc/incus-gha-runners/hooks.d/<CONTAINER_PREFIX>` | 项目特有依赖的安装脚本目录，见 4.5 |
 
 ### 4.3 网络开关（国内网络）
 
@@ -92,8 +90,6 @@
 | 键 | global | cn |
 |---|---|---|
 | `DOCKER_APT_URL` | `https://download.docker.com/linux/debian` | `https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian` |
-| `NODE_DIST_URL`（只用于 `PLAYWRIGHT_DEPS`） | `https://nodejs.org/dist` | `https://npmmirror.com/mirrors/node` |
-| `NPM_REGISTRY`（同上） | `https://registry.npmjs.org` | `https://registry.npmmirror.com` |
 | `RUNNER_DOWNLOAD_URL` | `https://github.com/actions/runner/releases/download` | 同左（GitHub 下载在国内一般可用，慢时改成自己的镜像） |
 
 `HUB_MIRROR_PORT`（默认 `5000`）、`HUB_MIRROR_NAME`（默认 `hub-mirror`）可改。
@@ -105,9 +101,18 @@
 | `INCUS_BRIDGE` | `incusbr0` | `incus admin init --minimal` 建的网桥 |
 | `UPLINK_IF` | 默认路由的网卡 | 防火墙放行规则里的出口网卡 |
 
+### 4.5 项目特有的依赖：钩子，不进配置
+
+脚本只装通用的东西（系统、Docker、runner）。哪个项目需要什么系统库（如 Playwright 浏览器的系统库、某个语言的编译工具链），由人或 agent 按项目的工作流判断，写成钩子脚本，不在配置里为某个工具开专门的键。
+
+- 钩子是 `HOOKS_DIR` 下的 `*.sh`，按文件名顺序推进容器、以 root 执行，必须可重复执行。环境变量里有 `DEBIAN_MIRROR` 等配置项，供钩子使用国内源。
+- `build-template` 建模板时执行全部钩子；已有的 runner 容器用 `apply-hooks [N…|--all]` 补上，不用重建（跳过正在跑任务的容器）。
+- 为什么要预装：runner 用户没有 sudo，工作流里装不了系统包（如 Playwright 的 `--with-deps`）。工作流自己能装到用户目录的东西（Node、pnpm、浏览器本体）不放进钩子。
+- skill 说明怎么判断要装什么（看工作流里哪些步骤需要 root），`docs/operations` 给出常见例子，包括 Playwright：临时装 Node，`npx playwright@<项目用的版本> install-deps chromium`，删掉 Node；升级 Playwright 后再 `apply-hooks --all`。
+
 ## 5. 脚本
 
-都在 `bin/`，以 root 执行，共用 `lib/common.sh`。通用参数：`--config FILE`、`--dry-run`（只打印将要做的改动，不改任何东西）、`-h`。退出码：`0` 成功；`1` 失败；`2` 用法错误；`3` 需要确认（见 5.6）。
+都在 `bin/`，以 root 执行，共用 `lib/common.sh`。通用参数：`--config FILE`、`--dry-run`（只打印将要做的改动，不改任何东西）、`-h`。退出码：`0` 成功；`1` 失败；`2` 用法错误；`3` 需要确认（见 5.7）。
 
 ### 5.1 `prepare-host`
 
@@ -128,9 +133,9 @@
 1. 系统镜像：`BASE_IMAGE=images` 时直接用 `images:debian/<版本>`；`mmdebstrap` 时在主机上构建 minbase（加 `systemd`、`systemd-resolved`、`udev`、`dbus`、`ca-certificates`、`curl`、`git`、`iproute2`、`gnupg`、`sudo`、`locales`；写 `/etc/systemd/network/eth0.network` 走 DHCP；缺 `udev` 时 networkd 一直等待、拿不到地址），以别名 `igr/debian-<版本>` 导入，之后复用。
 2. 起容器，设 `security.nesting=true`、`security.syscalls.intercept.mknod=true`、`security.syscalls.intercept.setxattr=true`（容器内跑 Docker 需要），等网络就绪。
 3. 容器内 apt 源指向 `DEBIAN_MIRROR`；按 Docker 官方 apt 源（`DOCKER_APT_URL`）装 `docker-ce`、`docker-ce-cli`、`containerd.io`、`docker-buildx-plugin`、`docker-compose-plugin`；写 `/etc/docker/daemon.json`（构建缓存上限、日志轮转；`HUB_MIRROR=on` 时加 `registry-mirrors` 和 `insecure-registries`）。
-4. 装 `EXTRA_PACKAGES`；`PLAYWRIGHT_DEPS` 非空时装浏览器系统库（见 4.2）。
+4. 装 `EXTRA_PACKAGES`。
 5. 建用户 `runner`（只在容器内 `docker` 组，无 sudo）。runner 安装包在主机上下载并缓存到 `/var/cache/incus-gha-runners/`，推进容器解压到 `/home/runner/actions-runner`，执行自带的 `bin/installdependencies.sh`（否则缺 libicu 等）。
-6. 执行 `TEMPLATE_HOOK`。
+6. 执行钩子（见 4.5）。
 7. 封装：清空 `/etc/machine-id`（否则复制出的容器 DHCP 拿到同一地址），删 `/var/lib/docker/engine-id`，`apt-get clean`，停止容器。
 
 模板已存在且完整（有完成标记）时什么都不做。`--rebuild` 删掉模板重建（不影响已有 runner 容器；`--yes` 跳过确认）。
@@ -153,12 +158,16 @@
 
 **停用、注销、删除，需确认**：非 `--yes` 时打印将要做的事，退出码 3。
 
-### 5.5 `status`、`doctor`
+### 5.5 `apply-hooks [N…|--all]`
+
+在已有的 runner 容器里执行钩子（见 4.5），跳过正在跑任务的容器并报告。
+
+### 5.6 `status`、`doctor`
 
 - `status`：每个容器的状态、IP、runner 服务状态、注册名、是否在跑任务、磁盘占用；模板是否存在、建于何时。只读。
 - `doctor`：只读检查，逐项打印 `ok` / `FAIL` 和修复办法：Incus 可用；网桥存在；转发放行规则在（主机有 Docker 时）；拉取缓存可从容器访问（`HUB_MIRROR=on` 时）；每个容器能解析域名、能访问 GitHub、容器内 `docker info` 正常、runner 服务在运行；容器 machine-id 互不相同。
 
-### 5.6 需要确认的操作
+### 5.7 需要确认的操作
 
 脚本本身不交互。会改动主机或注销 runner 的操作要么由 `--dry-run` 先列出，要么需要 `--yes`，由人（或 agent 征得人同意后）再执行：
 
@@ -172,11 +181,11 @@
 
 ## 6. Agent skill
 
-`skills/incus-gha-runners/SKILL.md` 只编排：先问清目标（新装、加 runner、换模板、排障），读本文和 `docs/` 中对应的部分，按顺序执行脚本；上表的操作以及删除主机上的用户和目录（例如迁移前直接跑在主机上的旧 runner）前，先把具体命令和影响告诉人、等到同意。令牌只经管道传，不打印。
+`skills/incus-gha-runners/SKILL.md` 只编排：先问清目标（新装、加 runner、换模板、装项目依赖、排障），读目标仓库的工作流判断它需要哪些预装的系统依赖并写成钩子，读本文和 `docs/` 中对应的部分，按顺序执行脚本；上表的操作以及删除主机上的用户和目录（例如迁移前直接跑在主机上的旧 runner）前，先把具体命令和影响告诉人、等到同意。令牌只经管道传，不打印。
 
 ## 7. 文档
 
-`README` 和 `docs/` 中英双语（`*.zh-CN.md` 同步）。`docs/` 计划：`design`（本文）、`setup`（从零开始的步骤）、`operations`（日常：加减 runner、换模板、升级 Playwright 依赖、迁移手工搭的环境）、`troubleshooting`（踩过的坑：networkd 等待、DHCP 同一 IP、FORWARD DROP、Docker Hub 被重置、`ERR_NETWORK_CHANGED`）。
+`README` 和 `docs/` 中英双语（`*.zh-CN.md` 同步）。`docs/` 计划：`design`（本文）、`setup`（从零开始的步骤）、`operations`（日常：加减 runner、换模板、写钩子和常见例子如 Playwright、迁移手工搭的环境）、`troubleshooting`（踩过的坑：networkd 等待、DHCP 同一 IP、FORWARD DROP、Docker Hub 被重置、`ERR_NETWORK_CHANGED`）。
 
 ## 8. 验证环境
 
