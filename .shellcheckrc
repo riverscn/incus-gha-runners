@@ -1,0 +1,5 @@
+source-path=SCRIPTDIR
+# Single-quoted $1 and ${…} are meant for the shell inside a container or hook.
+disable=SC2016
+# usage() is called from parse_args in lib/common.sh.
+disable=SC2329

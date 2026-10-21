@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Create, register and start runner containers <prefix>-N from the template.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo add-runner [--config FILE] [--dry-run] [--token-stdin] N... | --all
+
+For each runner number N: copy <prefix>-tpl to <prefix>-N (if missing), start it,
+register it as <RUNNER_NAME_PREFIX>N with RUNNER_LABELS (if not registered), and make
+sure its service runs. Already-done steps are skipped.
+
+Registering needs a registration token on standard input; one token covers all numbers:
+  gh api -X POST repos/OWNER/REPO/actions/runners/registration-token --jq .token \
+    | ssh HOST sudo add-runner --token-stdin 1 2
+EOF
+}
+
+parse_args "--dry-run --token-stdin --all N" -- "$@"
+require_root
+load_config
+resolve_numbers
+read_token
+take_lock
+
+if [[ $GITHUB_URL =~ ^https://github\.com/[^/]+/[^/]+$ ]]; then
+	token_api="repos/${GITHUB_URL#https://github.com/}/actions/runners/registration-token"
+else
+	token_api="orgs/${GITHUB_URL#https://github.com/}/actions/runners/registration-token"
+fi
+
+for n in "${NUMBERS[@]}"; do
+	name=$(container "$n")
+	echo "== $name ($(runner_name "$n"))"
+
+	if exists "$name"; then
+		ok "container exists"
+	else
+		exists "$TEMPLATE" || die "no template $TEMPLATE; run build-template first"
+		step "copy $TEMPLATE"
+		run incus copy "$TEMPLATE" "$name"
+		run incus config set "$name" boot.autostart=true
+		if [[ -n $LIMITS_CPU ]]; then run incus config set "$name" limits.cpu="$LIMITS_CPU"; fi
+		if [[ -n $LIMITS_MEMORY ]]; then run incus config set "$name" limits.memory="$LIMITS_MEMORY"; fi
+	fi
+
+	if [[ $(state "$name") == RUNNING ]]; then
+		ok "running"
+	else
+		step "start"
+		run incus start "$name"
+	fi
+	if ((DRY_RUN)) && ! exists "$name"; then
+		step "would register $(runner_name "$n") and start its service"
+		continue
+	fi
+	((DRY_RUN)) || wait_ready "$name"
+
+	if registered "$name"; then
+		ok "registered"
+	else
+		if [[ -z $TOKEN ]] && ((DRY_RUN)); then
+			step "would register $(runner_name "$n") (needs --token-stdin)"
+			continue
+		elif [[ -z $TOKEN ]]; then
+			needs_confirmation "$name needs registering; pipe a token from: gh api -X POST $token_api --jq .token"
+		fi
+		args=(--unattended --url "$GITHUB_URL" --name "$(runner_name "$n")" --labels "$RUNNER_LABELS" --replace)
+		if [[ -n $RUNNER_GROUP ]]; then args+=(--runnergroup "$RUNNER_GROUP"); fi
+		step "register $(runner_name "$n")"
+		if ((!DRY_RUN)); then
+			# The token goes in on stdin, so it never shows up in a process list on the host.
+			printf '%s\n' "$TOKEN" | incus exec "$name" -- su - runner -c \
+				"IFS= read -r t && cd $RUNNER_DIR && ./config.sh --token \"\$t\" $(printf '%q ' "${args[@]}")" ||
+				die "registering $name failed"
+		fi
+	fi
+
+	if [[ -n $(service_unit "$name") ]]; then
+		ok "service installed"
+	else
+		step "install service"
+		run incus exec "$name" -- sh -c "cd $RUNNER_DIR && ./svc.sh install runner >/dev/null"
+	fi
+	unit=$(service_unit "$name")
+	if [[ -n $unit ]] && incus exec "$name" -- systemctl is-active --quiet "$unit"; then
+		ok "service running"
+	else
+		step "start service"
+		run incus exec "$name" -- sh -c "cd $RUNNER_DIR && ./svc.sh start >/dev/null"
+	fi
+done

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Show the template and runner containers of one pool. Read-only.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo status [--config FILE]
+
+Shows the template and every runner container of the pool (numbers 1..RUNNER_COUNT, plus
+any other <prefix>-N that exists): state, address, registered name, service, whether it is
+running a job, and disk use. Changes nothing.
+EOF
+}
+
+parse_args "" -- "$@"
+require_root
+load_config
+
+echo "pool: $GITHUB_URL, labels $RUNNER_LABELS, containers $CONTAINER_PREFIX-N"
+if exists "$TEMPLATE"; then
+	echo "template: $TEMPLATE, $(incus file pull "$TEMPLATE/etc/incus-gha-runners-template" - 2>/dev/null || echo 'not built by build-template')"
+else
+	echo "template: $TEMPLATE missing"
+fi
+
+mapfile -t numbers < <(
+	{
+		seq 1 "$RUNNER_COUNT"
+		incus list -c n -f csv | sed -n "s/^$CONTAINER_PREFIX-\([0-9][0-9]*\)$/\1/p"
+	} | sort -nu
+)
+
+disk() {
+	local d
+	d=$(du -sh /var/lib/incus/storage-pools/*/containers/"$1" 2>/dev/null | cut -f1 | head -1)
+	printf '%s' "${d:--}"
+}
+
+fmt='%-10s %-8s %-15s %-14s %-9s %-5s %s\n'
+# shellcheck disable=SC2059
+printf "$fmt" CONTAINER STATE IPV4 REGISTERED SERVICE JOB DISK
+for n in "${numbers[@]}"; do
+	name=$(container "$n")
+	if ! exists "$name"; then
+		# shellcheck disable=SC2059
+		printf "$fmt" "$name" missing - - - - -
+		continue
+	fi
+	st=$(state "$name")
+	ip=- reg=- svc=- job=-
+	if [[ $st == RUNNING ]]; then
+		ip=$(incus list "^$name\$" -c 4 -f csv | grep -o '^[0-9.]*' | head -1 || true)
+		reg=$(incus exec "$name" -- sed -n 's/.*"agentName": *"\([^"]*\)".*/\1/p' "$RUNNER_DIR/.runner" 2>/dev/null || true)
+		unit=$(service_unit "$name")
+		if [[ -n $unit ]]; then svc=$(incus exec "$name" -- systemctl is-active "$unit" 2>/dev/null || true); fi
+		if busy "$name"; then job=yes; else job=no; fi
+	fi
+	# shellcheck disable=SC2059
+	printf "$fmt" "$name" "${st,,}" "${ip:--}" "${reg:--}" "${svc:--}" "$job" "$(disk "$name")"
+done

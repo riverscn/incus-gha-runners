@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Run the hooks in HOOKS_DIR in existing runner containers.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo apply-hooks [--config FILE] [--dry-run] N... | --all
+
+Runs every *.sh in HOOKS_DIR, as root and in file-name order, in the given runner
+containers, so they catch up with a changed hook without being recreated. Containers that
+are stopped or running a job are skipped and reported (exit code 3); run it again for
+those later.
+EOF
+}
+
+parse_args "--dry-run --all N" -- "$@"
+require_root
+load_config
+resolve_numbers
+take_lock
+
+IGR_LOG=$IGR_CACHE/apply-hooks-$CONTAINER_PREFIX.log
+if ((!DRY_RUN)); then
+	install -d "$IGR_CACHE"
+	: >"$IGR_LOG"
+	step "full output in $IGR_LOG"
+fi
+skipped=0 failed=0
+for n in "${NUMBERS[@]}"; do
+	name=$(container "$n")
+	echo "== $name"
+	if ! exists "$name"; then
+		warn "$name does not exist, skipped"
+	elif [[ $(state "$name") != RUNNING ]]; then
+		warn "$name is not running, skipped"
+		skipped=1
+	elif busy "$name"; then
+		warn "$name is running a job, skipped"
+		skipped=1
+	else
+		# Keep the runner from taking a job while the hooks change the system under it.
+		unit=$(service_unit "$name")
+		if [[ -n $unit ]]; then run incus exec "$name" -- systemctl stop "$unit"; fi
+		run_hooks "$name" || failed=1
+		if [[ -n $unit ]]; then run incus exec "$name" -- systemctl start "$unit"; fi
+	fi
+done
+((!failed)) || exit 1
+exit $((skipped ? 3 : 0))

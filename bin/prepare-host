@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Prepare the host once: Incus, the bridge, forwarding through Docker's firewall, the Docker Hub cache.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo prepare-host [--config FILE] [--dry-run]
+
+Installs Incus (and mmdebstrap when BASE_IMAGE=mmdebstrap), initialises Incus with a
+minimal setup when it is not initialised, and, when needed:
+  - allows the Incus bridge through Docker's FORWARD DROP policy (incus-docker-forward.service)
+  - starts the Docker Hub pull-through cache on the bridge address (HUB_MIRROR=on)
+Both change the host: run with --dry-run first and show the output to whoever owns the host.
+EOF
+}
+
+parse_args "--dry-run" -- "$@"
+require_root
+load_config
+take_lock
+
+echo "== system"
+# shellcheck source=/dev/null
+. /etc/os-release
+if [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]]; then
+	ok "$PRETTY_NAME"
+else
+	warn "tested on Debian 13 only; this is ${PRETTY_NAME:-unknown}"
+fi
+
+echo "== packages"
+packages=(incus)
+[[ $BASE_IMAGE == mmdebstrap ]] && packages+=(mmdebstrap)
+missing=()
+for p in "${packages[@]}"; do
+	if dpkg-query -W -f '${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+		ok "$p installed"
+	else
+		missing+=("$p")
+	fi
+done
+if ((${#missing[@]})); then
+	run apt-get update
+	run env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+fi
+
+echo "== incus"
+if ((DRY_RUN)) && ! command -v incus >/dev/null; then
+	step "would initialise Incus after installing it"
+elif [[ -n $(incus storage list -f csv 2>/dev/null) ]]; then
+	ok "initialised"
+	incus network show "$INCUS_BRIDGE" >/dev/null 2>&1 ||
+		die "Incus is initialised but has no network $INCUS_BRIDGE; set INCUS_BRIDGE to the bridge in use"
+	ok "bridge $INCUS_BRIDGE ($(bridge_ipv4 || echo 'no IPv4'))"
+else
+	run incus admin init --minimal
+	((DRY_RUN)) || ok "bridge $INCUS_BRIDGE ($(bridge_ipv4))"
+fi
+
+echo "== forwarding through Docker's firewall"
+unit=/etc/systemd/system/incus-docker-forward.service
+if ! command -v docker >/dev/null || ! command -v iptables >/dev/null; then
+	ok "no Docker on the host, nothing to do"
+elif ! iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'; then
+	ok "FORWARD policy is not DROP, nothing to do"
+else
+	[[ -n $UPLINK_IF ]] || die "cannot find the uplink interface; set UPLINK_IF"
+	rule_out=(DOCKER-USER -i "$INCUS_BRIDGE" -o "$UPLINK_IF" -j ACCEPT)
+	# shellcheck disable=SC2054 # RELATED,ESTABLISHED is one argument
+	rule_back=(DOCKER-USER -i "$UPLINK_IF" -o "$INCUS_BRIDGE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT)
+	if [[ -f $unit ]]; then
+		ok "$unit exists"
+	else
+		write_file "$unit" 0644 <<EOF
+[Unit]
+Description=Let Incus containers on $INCUS_BRIDGE through Docker's FORWARD DROP policy (incus-gha-runners)
+After=docker.service incus.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "iptables -C ${rule_out[*]} 2>/dev/null || iptables -I ${rule_out[*]}"
+ExecStart=/bin/sh -c "iptables -C ${rule_back[*]} 2>/dev/null || iptables -I ${rule_back[*]}"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		run systemctl daemon-reload
+	fi
+	if systemctl is-enabled --quiet incus-docker-forward.service 2>/dev/null; then
+		ok "incus-docker-forward.service enabled"
+	else
+		run systemctl enable incus-docker-forward.service
+	fi
+	if iptables -C "${rule_out[@]}" 2>/dev/null && iptables -C "${rule_back[@]}" 2>/dev/null; then
+		ok "DOCKER-USER allows $INCUS_BRIDGE <-> $UPLINK_IF"
+	else
+		run systemctl restart incus-docker-forward.service
+	fi
+fi
+
+echo "== Docker Hub pull-through cache"
+if [[ $HUB_MIRROR == off ]]; then
+	ok "HUB_MIRROR=off, nothing to do"
+else
+	command -v docker >/dev/null || die "HUB_MIRROR=on needs Docker on the host; install it or set HUB_MIRROR=off"
+	if ((DRY_RUN)) && ! addr=$(bridge_ipv4); then
+		addr='<bridge address>'
+	else
+		addr=$(bridge_ipv4) || die "$INCUS_BRIDGE has no IPv4 address"
+	fi
+	running=$(docker inspect -f '{{.State.Running}}' "$HUB_MIRROR_NAME" 2>/dev/null || true)
+	case $running in
+	true) ok "$HUB_MIRROR_NAME running" ;;
+	false) run docker start "$HUB_MIRROR_NAME" ;;
+	*)
+		run docker run -d --name "$HUB_MIRROR_NAME" --restart unless-stopped \
+			-p "$addr:$HUB_MIRROR_PORT:5000" \
+			-e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io \
+			-v "$HUB_MIRROR_NAME:/var/lib/registry" registry:3
+		;;
+	esac
+fi
+
+((DRY_RUN)) && echo "dry run: nothing was changed" || echo "host ready"

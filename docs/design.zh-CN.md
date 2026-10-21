@@ -2,7 +2,7 @@
 
 # 设计：脚本接口、配置与开关
 
-> 状态：**方案稿，待确认。** 确认后按本文写脚本；实现中发现要改的地方先改本文。
+> 本文是脚本的约定；改脚本的行为时先改本文。
 
 ## 1. 要解决的问题
 
@@ -82,13 +82,14 @@
 | 开关 | 默认（`NETWORK_PRESET=global`） | `NETWORK_PRESET=cn` 时 | 作用 |
 |---|---|---|---|
 | `BASE_IMAGE` | `images` | `mmdebstrap` | `images`：从 images.linuxcontainers.org 下载 `debian/<版本>`。`mmdebstrap`：在主机上从 `DEBIAN_MIRROR` 构建 minbase 系统镜像并导入（国内下载 images.linuxcontainers.org 常被中断） |
-| `DEBIAN_MIRROR` | `https://deb.debian.org/debian` | `https://mirrors.tuna.tsinghua.edu.cn/debian` | mmdebstrap 和容器内 apt 使用的源。安全更新始终走 `security.debian.org` |
+| `DEBIAN_MIRROR` | `https://deb.debian.org/debian` | `https://mirrors.tuna.tsinghua.edu.cn/debian` | mmdebstrap 和容器内 apt 使用的源 |
 | `HUB_MIRROR` | `off` | `on` | 在主机上跑 Docker Hub 拉取缓存（官方 `registry:3` 镜像，代理模式），只绑 `incusbr0` 的地址；容器内 dockerd 配成 `registry-mirrors`。缓存不可用时 Docker 自动回退直连 |
 
 和这几个开关一起变化的下载地址（也可以单独写）：
 
 | 键 | global | cn |
 |---|---|---|
+| `DEBIAN_SECURITY_MIRROR` | `https://security.debian.org/debian-security` | `https://mirrors.tuna.tsinghua.edu.cn/debian-security` |
 | `DOCKER_APT_URL` | `https://download.docker.com/linux/debian` | `https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian` |
 | `RUNNER_DOWNLOAD_URL` | `https://github.com/actions/runner/releases/download` | 同左（GitHub 下载在国内一般可用，慢时改成自己的镜像） |
 
@@ -138,7 +139,7 @@
 6. 执行钩子（见 4.5）。
 7. 封装：清空 `/etc/machine-id`（否则复制出的容器 DHCP 拿到同一地址），删 `/var/lib/docker/engine-id`，`apt-get clean`，停止容器。
 
-模板已存在且完整（有完成标记）时什么都不做。`--rebuild` 删掉模板重建（不影响已有 runner 容器；`--yes` 跳过确认）。
+模板已存在且完整（有完成标记）时什么都不做。构建在 `<前缀>-tpl-new` 里进行，成功后才替换 `<前缀>-tpl`，构建失败不会留下一个坏模板。`--rebuild` 重建并替换已有模板（需要 `--yes`；不影响已有 runner 容器）。
 
 ### 5.3 `add-runner [--token-stdin] N… | --all`
 
@@ -185,7 +186,7 @@
 
 ## 7. 文档
 
-`README` 和 `docs/` 中英双语（`*.zh-CN.md` 同步）。`docs/` 计划：`design`（本文）、`setup`（从零开始的步骤）、`operations`（日常：加减 runner、换模板、写钩子和常见例子如 Playwright、迁移手工搭的环境）、`troubleshooting`（踩过的坑：networkd 等待、DHCP 同一 IP、FORWARD DROP、Docker Hub 被重置、`ERR_NETWORK_CHANGED`）。
+`README` 和 `docs/` 中英双语（`*.zh-CN.md` 同步）。`docs/`：`design`（本文）、`setup`（从零开始的步骤）、`operations`（日常：加减 runner、换模板、写钩子和常见例子如 Playwright、迁移手工搭的环境）、`troubleshooting`（踩过的坑：networkd 等待、DHCP 同一 IP、FORWARD DROP、Docker Hub 被重置、`ERR_NETWORK_CHANGED`）。
 
 ## 8. 验证环境
 

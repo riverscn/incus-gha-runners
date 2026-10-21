@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Stop, deregister and delete runner containers <prefix>-N.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo remove-runner [--config FILE] [--dry-run] [--token-stdin] [--force] [--yes] N... | --all
+
+For each runner number N: stop its service, deregister it from GitHub, delete the container
+(and everything in it, including its Docker images and caches).
+
+  --token-stdin  read a removal token from standard input; one token covers all numbers:
+                   gh api -X POST repos/OWNER/REPO/actions/runners/remove-token --jq .token
+                 Without it the runner stays listed on GitHub as offline, until it is deleted
+                 there or a new runner registers under the same name.
+  --force        also remove runners that are running a job (the job fails)
+  --yes          required: this cannot be undone
+EOF
+}
+
+parse_args "--dry-run --token-stdin --force --yes --all N" -- "$@"
+require_root
+load_config
+resolve_numbers
+read_token
+take_lock
+
+# Check everything before changing anything.
+plan=()
+for n in "${NUMBERS[@]}"; do
+	name=$(container "$n")
+	if ! exists "$name"; then
+		ok "$name does not exist"
+		continue
+	fi
+	if busy "$name" && ((!FORCE)); then
+		die "$name is running a job; wait for it to finish, or use --force (the job fails)"
+	fi
+	plan+=("$n")
+done
+((${#plan[@]})) || exit 0
+
+if ((!YES && !DRY_RUN)); then
+	for n in "${plan[@]}"; do
+		printf '  will   remove %s (%s)%s\n' "$(container "$n")" "$(runner_name "$n")" \
+			"$( ((TOKEN_STDIN)) && echo ', deregister' || echo ', leave it listed on GitHub as offline')"
+	done
+	needs_confirmation "removing runners cannot be undone; rerun with --yes"
+fi
+
+for n in "${plan[@]}"; do
+	name=$(container "$n")
+	echo "== $name ($(runner_name "$n"))"
+	if [[ $(state "$name") != RUNNING ]]; then
+		if [[ -n $TOKEN ]]; then
+			run incus start "$name"
+			((DRY_RUN)) || wait_ready "$name"
+		fi
+	fi
+	if [[ $(state "$name") == RUNNING ]] || ((DRY_RUN)); then
+		if [[ -n $(service_unit "$name") ]]; then
+			step "stop and uninstall service"
+			run incus exec "$name" -- sh -c "cd $RUNNER_DIR && ./svc.sh stop >/dev/null && ./svc.sh uninstall >/dev/null"
+		fi
+		if [[ -n $TOKEN ]] && registered "$name"; then
+			step "deregister"
+			if ((!DRY_RUN)); then
+				printf '%s\n' "$TOKEN" | incus exec "$name" -- su - runner -c \
+					"IFS= read -r t && cd $RUNNER_DIR && ./config.sh remove --token \"\$t\"" ||
+					die "deregistering $name failed; nothing was deleted"
+			fi
+		elif [[ -z $TOKEN ]]; then
+			warn "$(runner_name "$n") stays listed on GitHub as offline"
+		fi
+	fi
+	step "delete container"
+	run incus delete --force "$name"
+done

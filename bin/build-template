@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# Build the stopped template container <prefix>-tpl that runner containers are copied from.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo build-template [--config FILE] [--dry-run] [--rebuild [--yes]]
+
+Builds <CONTAINER_PREFIX>-tpl: Debian, Docker, the runner program, the hooks in HOOKS_DIR,
+sealed and stopped. Does nothing when a complete template exists.
+
+  --rebuild   build a new template and replace the existing one (needs --yes).
+              Runner containers are not touched; recreate them one at a time to pick it up.
+EOF
+}
+
+parse_args "--dry-run --rebuild --yes" -- "$@"
+require_root
+load_config
+take_lock
+
+MARKER=/etc/incus-gha-runners-template
+NEW=$TEMPLATE-new
+ARCH=$(uname -m)
+case $ARCH in
+x86_64) RUNNER_ARCH=x64 ;;
+aarch64) RUNNER_ARCH=arm64 ;;
+*) die "unsupported architecture $ARCH" ;;
+esac
+
+template_complete() { incus file pull "$TEMPLATE$MARKER" - >/dev/null 2>&1; }
+
+echo "== template $TEMPLATE"
+if exists "$TEMPLATE"; then
+	if ((!REBUILD)) && template_complete; then
+		ok "$TEMPLATE exists: $(incus file pull "$TEMPLATE$MARKER" - | head -1)"
+		exit 0
+	fi
+	if ((!REBUILD)); then
+		needs_confirmation "$TEMPLATE exists but was not built by this script (or its build was interrupted); rerun with --rebuild --yes to replace it"
+	fi
+	((YES || DRY_RUN)) || needs_confirmation "--rebuild replaces $TEMPLATE; rerun with --yes"
+fi
+
+# ---- runner archive ---------------------------------------------------------
+
+echo "== runner program"
+version=$RUNNER_VERSION
+if [[ $version == latest ]]; then
+	version=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest |
+		sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)
+	[[ -n $version ]] || die "cannot find the latest runner version; set RUNNER_VERSION"
+fi
+archive=$IGR_CACHE/actions-runner-linux-$RUNNER_ARCH-$version.tar.gz
+if [[ -s $archive ]]; then
+	ok "cached $(basename "$archive")"
+else
+	run install -d "$IGR_CACHE"
+	run curl -fSL --retry 3 -o "$archive.part" "$RUNNER_DOWNLOAD_URL/v$version/$(basename "$archive")"
+	run mv "$archive.part" "$archive"
+fi
+
+# ---- base image -------------------------------------------------------------
+
+IGR_LOG=$IGR_CACHE/build-$TEMPLATE.log
+if ((!DRY_RUN)); then
+	install -d "$IGR_CACHE"
+	: >"$IGR_LOG"
+	step "full output in $IGR_LOG"
+fi
+
+echo "== base image"
+if [[ $BASE_IMAGE == images ]]; then
+	image=images:debian/$DEBIAN_SUITE
+	ok "using $image"
+else
+	image=igr/debian-$DEBIAN_SUITE
+	if incus image info "$image" >/dev/null 2>&1; then
+		ok "$image exists"
+	else
+		step "building $image with mmdebstrap from $DEBIAN_MIRROR"
+		work=$IGR_CACHE/image-build
+		run rm -rf "$work"
+		run install -d "$work"
+		run quiet mmdebstrap --variant=minbase --format=tar \
+			--include=systemd,systemd-sysv,systemd-resolved,udev,dbus,ca-certificates,curl,git,iproute2,gnupg,sudo,locales \
+			--customize-hook='printf "[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n" >"$1/etc/systemd/network/eth0.network"' \
+			--customize-hook='chroot "$1" systemctl enable systemd-networkd systemd-resolved' \
+			--customize-hook='ln -sf ../run/systemd/resolve/stub-resolv.conf "$1/etc/resolv.conf"' \
+			--customize-hook='rm -f "$1/etc/hostname"; : >"$1/etc/machine-id"' \
+			"$DEBIAN_SUITE" "$work/rootfs.tar" "$DEBIAN_MIRROR"
+		write_file "$work/templates/hostname.tpl" 0644 <<<'{{ instance.name }}'
+		write_file "$work/metadata.yaml" 0644 <<EOF
+architecture: $ARCH
+creation_date: $(date +%s)
+properties:
+  description: Debian $DEBIAN_SUITE minbase (mmdebstrap, incus-gha-runners)
+  os: debian
+  release: $DEBIAN_SUITE
+templates:
+  /etc/hostname:
+    when: [create, copy]
+    template: hostname.tpl
+EOF
+		run tar -C "$work" -cf "$work/meta.tar" metadata.yaml templates
+		run incus image import "$work/meta.tar" "$work/rootfs.tar" --alias "$image"
+		run rm -rf "$work"
+	fi
+fi
+
+# ---- build into <prefix>-tpl-new, then swap ---------------------------------
+
+echo "== build $NEW"
+if exists "$NEW"; then run incus delete --force "$NEW"; fi
+run incus launch "$image" "$NEW" \
+	-c security.nesting=true \
+	-c security.syscalls.intercept.mknod=true \
+	-c security.syscalls.intercept.setxattr=true \
+	-c boot.autostart=false
+if ((DRY_RUN)); then
+	step "would provision $NEW (Docker, user runner, runner $version), run hooks, seal it and replace $TEMPLATE"
+	echo "dry run: nothing was changed"
+	exit 0
+fi
+wait_ready "$NEW"
+
+mapfile -t env < <(hook_env)
+incus file push -q "$archive" "$NEW/tmp/actions-runner.tar.gz"
+incus file push -q "$IGR_ROOT/lib/provision-template.sh" "$NEW/tmp/igr-provision.sh" --mode 0700
+step "provision: Docker, user runner, runner $version"
+quiet incus exec "$NEW" "${env[@]}" --env RUNNER_ARCHIVE=/tmp/actions-runner.tar.gz -- /tmp/igr-provision.sh
+incus exec "$NEW" -- rm -f /tmp/igr-provision.sh
+
+run_hooks "$NEW"
+
+step "seal"
+incus exec "$NEW" -- sh -c '
+	systemctl stop docker.socket docker containerd
+	rm -f /var/lib/docker/engine-id
+	apt-get clean
+	rm -rf /var/lib/apt/lists/* /tmp/*
+	: >/etc/machine-id
+	rm -f /var/lib/dbus/machine-id'
+docker_version=$(incus exec "$NEW" -- dpkg-query -W -f '${Version}' docker-ce)
+hooks=none
+if [[ -d $HOOKS_DIR ]]; then
+	hooks=$(find "$HOOKS_DIR" -maxdepth 1 -name '*.sh' -printf '%f\n' | sort | paste -sd ' ')
+fi
+printf 'built %s: debian %s, docker-ce %s, runner %s, hooks: %s\n' \
+	"$(date -u +%Y-%m-%dT%H:%MZ)" "$DEBIAN_SUITE" "$docker_version" "$version" "${hooks:-none}" |
+	incus file push -q - "$NEW$MARKER"
+incus stop "$NEW"
+
+if exists "$TEMPLATE"; then incus delete --force "$TEMPLATE"; fi
+incus move "$NEW" "$TEMPLATE"
+ok "$TEMPLATE: $(incus file pull "$TEMPLATE$MARKER" -)"

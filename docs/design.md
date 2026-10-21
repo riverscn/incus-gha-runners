@@ -2,7 +2,7 @@
 
 # Design: script interface, configuration and switches
 
-> Status: **proposal, awaiting confirmation.** The scripts are written from this document once it is agreed; anything that has to change during implementation is changed here first.
+> This document is the contract for the scripts; change it first when changing what they do.
 
 ## 1. The problem
 
@@ -82,13 +82,14 @@ The three switches are independent. `NETWORK_PRESET=cn` sets defaults that work 
 | Switch | Default (`NETWORK_PRESET=global`) | With `NETWORK_PRESET=cn` | Effect |
 |---|---|---|---|
 | `BASE_IMAGE` | `images` | `mmdebstrap` | `images`: download `debian/<release>` from images.linuxcontainers.org. `mmdebstrap`: build a minbase system image on the host from `DEBIAN_MIRROR` and import it (downloads from images.linuxcontainers.org are often reset in mainland China) |
-| `DEBIAN_MIRROR` | `https://deb.debian.org/debian` | `https://mirrors.tuna.tsinghua.edu.cn/debian` | Used by mmdebstrap and by apt in the containers. Security updates always come from `security.debian.org` |
+| `DEBIAN_MIRROR` | `https://deb.debian.org/debian` | `https://mirrors.tuna.tsinghua.edu.cn/debian` | Used by mmdebstrap and by apt in the containers |
 | `HUB_MIRROR` | `off` | `on` | Runs a Docker Hub pull-through cache on the host (official `registry:3` image in proxy mode), bound to `incusbr0`'s address only; each container's dockerd uses it as a `registry-mirrors` entry. Docker falls back to Docker Hub when the cache is down |
 
 Download locations that follow these switches (each can also be set on its own):
 
 | Key | global | cn |
 |---|---|---|
+| `DEBIAN_SECURITY_MIRROR` | `https://security.debian.org/debian-security` | `https://mirrors.tuna.tsinghua.edu.cn/debian-security` |
 | `DOCKER_APT_URL` | `https://download.docker.com/linux/debian` | `https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian` |
 | `RUNNER_DOWNLOAD_URL` | `https://github.com/actions/runner/releases/download` | same (GitHub downloads usually work in mainland China; point it at your own mirror if slow) |
 
@@ -138,7 +139,7 @@ Builds the template container `<prefix>-tpl`, left stopped.
 6. Run the hooks (see 4.5).
 7. Seal: empty `/etc/machine-id` (otherwise every copy gets the same DHCP address), delete `/var/lib/docker/engine-id`, `apt-get clean`, stop the container.
 
-Does nothing when a complete template (with a completion marker) exists. `--rebuild` deletes and rebuilds the template (existing runner containers are untouched; `--yes` skips confirmation).
+Does nothing when a complete template (with a completion marker) exists. The build happens in `<prefix>-tpl-new`, which replaces `<prefix>-tpl` only when it succeeded, so a failed build never leaves a broken template. `--rebuild` builds and replaces an existing template (needs `--yes`; existing runner containers are untouched).
 
 ### 5.3 `add-runner [--token-stdin] N… | --all`
 
@@ -185,7 +186,7 @@ The scripts never prompt. Operations that change the host or deregister runners 
 
 ## 7. Documentation
 
-`README` and `docs/` in English and Simplified Chinese (`*.zh-CN.md`, kept in step). Planned `docs/`: `design` (this document), `setup` (from scratch), `operations` (day to day: more or fewer runners, a new template, writing hooks with common examples such as Playwright, migrating a hand-built setup), `troubleshooting` (known pitfalls: networkd waiting, the same DHCP address, FORWARD DROP, Docker Hub resets, `ERR_NETWORK_CHANGED`).
+`README` and `docs/` in English and Simplified Chinese (`*.zh-CN.md`, kept in step). `docs/`: `design` (this document), `setup` (from scratch), `operations` (day to day: more or fewer runners, a new template, writing hooks with common examples such as Playwright, migrating a hand-built setup), `troubleshooting` (known pitfalls: networkd waiting, the same DHCP address, FORWARD DROP, Docker Hub resets, `ERR_NETWORK_CHANGED`).
 
 ## 8. Tested on
 

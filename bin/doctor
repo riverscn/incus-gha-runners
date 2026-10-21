@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Check the host and the runner containers of one pool. Read-only.
+# shellcheck source=../lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+
+usage() {
+	cat <<'EOF'
+Usage: sudo doctor [--config FILE]
+
+Checks the host (Incus, bridge, forwarding rules, Docker Hub cache) and each runner
+container 1..RUNNER_COUNT (DNS, GitHub, Docker, runner service, distinct machine-ids).
+Prints ok or FAIL with a fix for each, and exits 1 when anything failed. Changes nothing.
+EOF
+}
+
+parse_args "" -- "$@"
+require_root
+load_config
+
+failed=0
+check() { # check DESCRIPTION FIX COMMAND...
+	local what=$1 fix=$2
+	shift 2
+	if "$@" >/dev/null 2>&1; then
+		ok "$what"
+	else
+		printf '  FAIL   %s\n         fix: %s\n' "$what" "$fix"
+		failed=1
+	fi
+}
+
+echo "== host"
+check "incus works" "sudo bin/prepare-host" incus info
+check "bridge $INCUS_BRIDGE has an IPv4 address" "sudo bin/prepare-host; or set INCUS_BRIDGE" bridge_ipv4
+addr=$(bridge_ipv4 || true)
+if command -v docker >/dev/null && iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'; then
+	check "DOCKER-USER lets $INCUS_BRIDGE out through $UPLINK_IF" \
+		"sudo systemctl restart incus-docker-forward.service (or run prepare-host)" \
+		iptables -C DOCKER-USER -i "$INCUS_BRIDGE" -o "$UPLINK_IF" -j ACCEPT
+	check "DOCKER-USER lets replies back in" \
+		"sudo systemctl restart incus-docker-forward.service (or run prepare-host)" \
+		iptables -C DOCKER-USER -i "$UPLINK_IF" -o "$INCUS_BRIDGE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+fi
+if [[ $HUB_MIRROR == on ]]; then
+	check "Docker Hub cache answers on $addr:$HUB_MIRROR_PORT" \
+		"docker start $HUB_MIRROR_NAME (or run prepare-host)" \
+		curl -fsS -m 5 "http://$addr:$HUB_MIRROR_PORT/v2/"
+fi
+check "template $TEMPLATE exists" "sudo bin/build-template" exists "$TEMPLATE"
+
+declare -A machine_ids=()
+for n in $(seq 1 "$RUNNER_COUNT"); do
+	name=$(container "$n")
+	echo "== $name"
+	check "exists" "sudo bin/add-runner $n" exists "$name" || true
+	exists "$name" || continue
+	check "running" "sudo incus start $name" test "$(state "$name")" = RUNNING
+	[[ $(state "$name") == RUNNING ]] || continue
+	check "resolves github.com" "see docs/troubleshooting.md (network)" incus exec "$name" -- getent ahostsv4 github.com
+	check "reaches api.github.com" "see docs/troubleshooting.md (network)" incus exec "$name" -- curl -fsS -m 10 -o /dev/null https://api.github.com
+	check "docker works" "sudo incus exec $name -- systemctl restart docker" incus exec "$name" -- docker info
+	if [[ $HUB_MIRROR == on ]]; then
+		check "reaches the Docker Hub cache" "see docs/troubleshooting.md (Docker Hub cache)" \
+			incus exec "$name" -- curl -fsS -m 5 "http://$addr:$HUB_MIRROR_PORT/v2/"
+	fi
+	check "registered" "pipe a registration token to: sudo bin/add-runner --token-stdin $n" registered "$name"
+	unit=$(service_unit "$name")
+	check "runner service running" "sudo bin/add-runner $n" incus exec "$name" -- systemctl is-active "${unit:-none}"
+	id=$(incus exec "$name" -- cat /etc/machine-id 2>/dev/null || true)
+	if [[ -n $id && -n ${machine_ids[$id]:-} ]]; then
+		printf '  FAIL   machine-id same as %s\n         fix: recreate it (remove-runner %s, add-runner %s); the template was not sealed\n' \
+			"${machine_ids[$id]}" "$n" "$n"
+		failed=1
+	elif [[ -n $id ]]; then
+		machine_ids[$id]=$name
+		ok "machine-id is unique"
+	fi
+done
+
+exit $((failed))
