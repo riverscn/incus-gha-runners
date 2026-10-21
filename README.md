@@ -4,6 +4,24 @@
 
 **Several GitHub Actions self-hosted runners on one Linux host, each in its own Incus system container.**
 
+> **Using an AI coding agent?** Install the skill:
+>
+> ```bash
+> npx skills add riverscn/incus-gha-runners
+> ```
+>
+> Then open the agent in your project and ask, for example:
+>
+> ```text
+> Set up 4 GitHub Actions self-hosted runners for this repository on my host `ssh myhost`, each in its
+> own Incus container, using incus-gha-runners. Read the workflows to find the label and the system
+> packages the jobs need. Show me every change to the host before making it, and never print a token.
+> ```
+>
+> Later: "add two more runners", "e2e says a shared library is missing after the Playwright upgrade",
+> "why is runner 3 offline?". The agent runs the scripts and asks before anything that changes the host
+> or a runner.
+
 Self-hosted runners that share one host as processes of one user get in each other's way: parallel jobs
 rewrite the same tool directories in `$HOME`, one job's `docker compose down` changes the network under
 another job's browser (`net::ERR_NETWORK_CHANGED`), and the `docker` group is root on the host. Here every
@@ -44,9 +62,6 @@ ssh HOST sudo /opt/incus-gha-runners/bin/doctor
 ```
 
 Then use the label in a workflow: `runs-on: [self-hosted, ci]`.
-
-> **Using an AI coding agent?** Install the skill (`skills/incus-gha-runners`) or point the agent at
-> [SKILL.md](skills/incus-gha-runners/SKILL.md), and ask it to set up runners on your host.
 
 ## Documentation
 

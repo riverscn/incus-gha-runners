@@ -4,6 +4,23 @@
 
 **在一台 Linux 主机上跑多个 GitHub Actions self-hosted runner，每个 runner 一个 Incus 系统容器。**
 
+> **用 AI 编码助手？** 先安装 skill：
+>
+> ```bash
+> npx skills add riverscn/incus-gha-runners
+> ```
+>
+> 然后在你的项目里打开 agent，这样说，例如：
+>
+> ```text
+> 用 incus-gha-runners 在我的主机（`ssh myhost`）上给这个仓库装 4 个 GitHub Actions self-hosted runner，
+> 每个 runner 一个 Incus 容器。主机在国内。读工作流，找出要用的标签和任务需要预装的系统包。
+> 改动主机之前先把每一项改动给我看，不要打印任何令牌。
+> ```
+>
+> 以后也可以直接问："再加两个 runner"、"升级 Playwright 后 e2e 报缺共享库"、"3 号 runner 为什么离线？"。
+> agent 会执行脚本，改动主机或 runner 之前先问你。
+
 几个 self-hosted runner 以同一个用户的进程跑在同一台主机上时会互相干扰：并行任务同时改写 `$HOME` 里的同一个工具目录；一个任务 `docker compose down` 改了网络，另一个任务里的浏览器报 `net::ERR_NETWORK_CHANGED`；`docker` 组等于主机 root。本项目给每个 runner 一个非特权的 Incus 系统容器，从模板复制，里面有自己的 systemd、dockerd、网络命名空间和 `runner` 用户。任务看到的是一台独立的机器，工作流写法和 GitHub 托管的 runner 一样。
 
 - 在主机上以 root 执行的 Bash 脚本：`prepare-host`、`build-template`、`add-runner`、`remove-runner`、`apply-hooks`、`status`、`doctor`。都可以重复执行，都支持 `--dry-run`。
@@ -36,8 +53,6 @@ ssh HOST sudo /opt/incus-gha-runners/bin/doctor
 ```
 
 然后在工作流里用这个标签：`runs-on: [self-hosted, ci]`。
-
-> **用 AI 编码助手？** 安装 skill（`skills/incus-gha-runners`），或者让 agent 读 [SKILL.md](skills/incus-gha-runners/SKILL.md)，再让它在你的主机上装 runner。
 
 ## 文档
 
